@@ -9,7 +9,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
-from .coordinator import SectorAlarmConfigEntry, SectorDataUpdateCoordinator
+from custom_components.sector.const import RUNTIME_DATA
+
+from .coordinator import (
+    SectorDeviceDataUpdateCoordinator,
+    SectorAlarmConfigEntry,
+)
 from .entity import SectorAlarmBaseEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -21,62 +26,69 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ):
     """Set up a single event entity per device in Sector Alarm coordinator."""
-    coordinator: SectorDataUpdateCoordinator = entry.runtime_data
-    grouped_events = await coordinator.process_events()
     entities = []
+    coordinators: list[SectorDeviceDataUpdateCoordinator] = entry.runtime_data[
+        RUNTIME_DATA.DEVICE_COORDINATORS
+    ]
 
-    for device_serial, event_categories in grouped_events.items():
-        device_info = coordinator.get_device_info(device_serial)
-        device_name = device_info["name"]
-        device_model = device_info["model"]
+    for coordinator in coordinators:
+        grouped_events = coordinator.get_processed_events()
+        for device_serial in grouped_events.keys():
+            device_info = coordinator.get_device_info(device_serial)
+            device_name = device_info["name"]
+            device_model = device_info["model"]
 
-        _LOGGER.debug(
-            "SECTOR_EVENT: Creating event entity for device: %s, Model: %s",
-            device_name,
-            device_model,
-        )
-
-        # Define unique entity ID for each device, regardless of event type
-        entity_unique_id = f"{device_serial}_event"
-
-        # Check if the entity already exists by unique ID
-        if hass.states.get(f"event.{entity_unique_id}"):
             _LOGGER.debug(
-                "SECTOR_EVENT: Entity with unique ID '%s' already exists, skipping.",
-                entity_unique_id,
+                "SECTOR_EVENT: Creating event entity for device: %s, Model: %s",
+                device_name,
+                device_model,
             )
-            continue
 
-        # Create a single entity to handle multiple event types for the device
-        entity = SectorAlarmEvent(coordinator, device_serial, device_info)
-        entities.append(entity)
-        _LOGGER.debug(
-            "SECTOR_EVENT: Created event entity: %s (unique_id=%s, name=%s)",
-            entity,
-            entity.unique_id,
-            entity.name,
-        )
+            # Define unique entity ID for each device, regardless of event type
+            entity_unique_id = f"{device_serial}_event"
+
+            # Check if the entity already exists by unique ID
+            if hass.states.get(f"event.{entity_unique_id}"):
+                _LOGGER.debug(
+                    "SECTOR_EVENT: Entity with unique ID '%s' already exists, skipping.",
+                    entity_unique_id,
+                )
+                continue
+
+            # Create a single entity to handle multiple event types for the device
+            entity = SectorAlarmEvent(coordinator, device_serial, device_info)
+            entities.append(entity)
+            _LOGGER.debug(
+                "SECTOR_EVENT: Created event entity: %s (unique_id=%s, name=%s)",
+                entity,
+                entity.unique_id,
+                entity.name,
+            )
 
     _LOGGER.debug("SECTOR_EVENT: Total event entities added: %d", len(entities))
     async_add_entities(entities)
 
 
-class SectorAlarmEvent(SectorAlarmBaseEntity, EventEntity):
+class SectorAlarmEvent(
+    SectorAlarmBaseEntity[SectorDeviceDataUpdateCoordinator], EventEntity
+):
     """Representation of a single event entity for a Sector Alarm device."""
 
     def __init__(self, coordinator, serial_no, device_info):
         """Initialize the single event entity for the device."""
         # Pass serial_no, device_name, and device_model to the parent class
         super().__init__(
-            coordinator, serial_no, device_info["name"], device_info["model"]
+            coordinator,
+            serial_no,
+            device_info["name"],
+            device_info["model"],
+            device_info["model"],
         )
-        self._serial_no = serial_no
         self._device_name = device_info["name"]
         self._device_model = device_info["model"]
         self._events = []  # Store all events
         self._attr_unique_id = f"{self._device_name}_event"
         self._attr_name = f"{self._device_name} Event Log"
-        self._attr_device_class = "timestamp"
         self._last_event_type = None
         self._last_formatted_event = None
         _LOGGER.debug(
@@ -93,7 +105,7 @@ class SectorAlarmEvent(SectorAlarmBaseEntity, EventEntity):
     @callback
     def _async_handle_event(self):
         """Update entity based on the most recent event."""
-        grouped_events = self.coordinator.process_events
+        grouped_events = self.coordinator.get_processed_events()
         _LOGGER.debug("SECTOR_EVENT: Processing events for device %s", self._serial_no)
 
         if self._serial_no not in grouped_events:
@@ -135,7 +147,7 @@ class SectorAlarmEvent(SectorAlarmBaseEntity, EventEntity):
                     event_time,
                 )
 
-    def _trigger_event(self, event_type, event_attributes):
+    def _trigger_event(self, event_type, event_attributes: dict[str, Any]):
         """Trigger an event update with the latest type."""
         event_timestamp = event_attributes.get(
             "timestamp", datetime.now(dt_util.UTC).isoformat()
